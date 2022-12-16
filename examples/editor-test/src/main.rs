@@ -24,7 +24,7 @@ fn redraw(window: &mut Window, editor: &mut Editor<'_>, swash_cache: &mut SwashC
         editor.buffer_mut().set_redraw(false);
 
         let duration = instant.elapsed();
-        log::debug!("redraw: {:?}", duration);
+        // log::debug!("redraw: {:?}", duration);
     }
 }
 

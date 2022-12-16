@@ -2,7 +2,10 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use log::debug;
+use core::cmp::{min, max};
 use core::mem;
+use core::ops::Range;
 use unicode_script::{Script, UnicodeScript};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -244,7 +247,7 @@ pub struct ShapeGlyph {
 }
 
 impl ShapeGlyph {
-    fn layout(&self, font_size: i32, x: f32, y: f32, rtl: bool) -> LayoutGlyph {
+    fn layout(&self, font_size: i32, x: f32, y: f32, level: unicode_bidi::Level) -> LayoutGlyph {
         let x_offset = font_size as f32 * self.x_offset;
         let y_offset = font_size as f32 * self.y_offset;
         let x_advance = font_size as f32 * self.x_advance;
@@ -260,7 +263,7 @@ impl ShapeGlyph {
             end: self.end,
             x,
             w: x_advance,
-            rtl,
+            level,
             cache_key,
             x_int,
             y_int,
@@ -274,6 +277,10 @@ impl ShapeGlyph {
 pub struct ShapeWord {
     pub blank: bool,
     pub glyphs: Vec<ShapeGlyph>,
+    word_range: Range<usize>,
+    level: unicode_bidi::Level,
+    x_advance: f32,
+    y_advance: f32,
 }
 
 impl ShapeWord {
@@ -281,12 +288,11 @@ impl ShapeWord {
         font_system: &'a FontSystem,
         line: &str,
         attrs_list: &AttrsList,
-        start_word: usize,
-        end_word: usize,
-        span_rtl: bool,
+        word_range: Range<usize>,
+        level: unicode_bidi::Level,
         blank: bool,
     ) -> Self {
-        let word = &line[start_word..end_word];
+        let word = &line[word_range.clone()];
 
         log::trace!(
             "      Word{}: '{}'",
@@ -295,11 +301,12 @@ impl ShapeWord {
         );
 
         let mut glyphs = Vec::new();
+        let span_rtl = level.is_rtl();
 
-        let mut start_run = start_word;
+        let mut start_run = word_range.start;
         let mut attrs = attrs_list.defaults();
         for (egc_i, _egc) in word.grapheme_indices(true) {
-            let start_egc = start_word + egc_i;
+            let start_egc = word_range.start + egc_i;
             let attrs_egc = attrs_list.get_span(start_egc);
             if ! attrs.compatible(&attrs_egc) {
                 //TODO: more efficient
@@ -316,26 +323,34 @@ impl ShapeWord {
                 attrs = attrs_egc;
             }
         }
-        if start_run < end_word {
+        if start_run < word_range.end {
             //TODO: more efficient
             glyphs.append(&mut shape_run(
                 font_system,
                 line,
                 attrs_list,
                 start_run,
-                end_word,
+                word_range.end,
                 span_rtl
             ));
         }
 
-        Self { blank, glyphs }
+        let mut x_advance = 0.0;
+        let mut y_advance = 0.0;
+        for glyph in &glyphs {
+            x_advance += glyph.x_advance;
+            y_advance += glyph.y_advance;
+        }
+
+        Self { blank, glyphs, word_range, x_advance, y_advance, level }
     }
 }
 
 /// A shaped span (for bidirectional processing)
 pub struct ShapeSpan {
-    pub rtl: bool,
+    pub level: unicode_bidi::Level,
     pub words: Vec<ShapeWord>,
+    span_range: Range<usize>,
 }
 
 impl ShapeSpan {
@@ -343,16 +358,15 @@ impl ShapeSpan {
         font_system: &'a FontSystem,
         line: &str,
         attrs_list: &AttrsList,
-        start_span: usize,
-        end_span: usize,
+        span_range: Range<usize>,
         line_rtl: bool,
-        span_rtl: bool,
+        level: unicode_bidi::Level,
     ) -> Self {
-        let span = &line[start_span..end_span];
+        let span = &line[span_range.start..span_range.end];
 
         log::trace!(
             "  Span {}: '{}'",
-            if span_rtl { "RTL" } else { "LTR" },
+            if level.is_rtl() { "RTL" } else { "LTR" },
             span
         );
 
@@ -373,9 +387,8 @@ impl ShapeSpan {
                     font_system,
                     line,
                     attrs_list,
-                    start_span + start_word,
-                    start_span + start_lb,
-                    span_rtl,
+                    (span_range.start + start_word)..(span_range.start + start_lb),
+                    level,
                     false,
                 ));
             }
@@ -384,9 +397,8 @@ impl ShapeSpan {
                     font_system,
                     line,
                     attrs_list,
-                    start_span + start_lb,
-                    start_span + end_lb,
-                    span_rtl,
+                    (span_range.start + start_lb)..(span_range.start + end_lb),
+                    level,
                     true,
                 ));
             }
@@ -401,13 +413,14 @@ impl ShapeSpan {
         }
 
         // Reverse words in spans that do not match line direction
-        if line_rtl != span_rtl {
+        if line_rtl != level.is_rtl() {
             words.reverse();
         }
 
         ShapeSpan {
-            rtl: span_rtl,
+            level,
             words,
+            span_range
         }
     }
 }
@@ -416,7 +429,9 @@ impl ShapeSpan {
 pub struct ShapeLine {
     pub rtl: bool,
     pub spans: Vec<ShapeSpan>,
+    levels: Vec<unicode_bidi::Level>,
 }
+
 
 impl ShapeLine {
     pub fn new<'a>(
@@ -425,6 +440,7 @@ impl ShapeLine {
         attrs_list: &AttrsList
     ) -> Self {
         let mut spans = Vec::new();
+        let mut levels = Vec::new();
 
         let bidi = unicode_bidi::BidiInfo::new(line, None);
         let rtl = if bidi.paragraphs.is_empty() {
@@ -437,43 +453,163 @@ impl ShapeLine {
             log::trace!("Line {}: '{}'", if line_rtl { "RTL" } else { "LTR" }, line);
 
             let line_range = para_info.range.clone();
-            let (levels, runs) = bidi.visual_runs(para_info, line_range);
+             // let (levels, runs) = bidi.visual_runs(para_info, line_range);
+            levels = Self::adjust_levels(&unicode_bidi::Paragraph::new(&bidi, para_info));
 
-            if line_rtl {
-                for range in runs.into_iter().rev() {
-                    let span_rtl = levels[range.start].is_rtl();
+            // Find consecutive level runs.
+            let mut start = line_range.start;
+            let mut run_level = levels[start];
+
+            for (i, &new_level) in levels.iter().enumerate().take(line_range.end).skip(start + 1) {
+                if new_level != run_level {
+                    // End of the previous run, start of a new one.
+                    // runs.push(start..i);
                     spans.push(ShapeSpan::new(
                         font_system,
                         line,
                         attrs_list,
-                        range.start,
-                        range.end,
+                        start..i,
                         line_rtl,
-                        span_rtl
+                        run_level,
                     ));
-                }
-
-            }
-            else {
-                for range in runs.into_iter() {
-                    let span_rtl = levels[range.start].is_rtl(); //paragraph.info.levels[i].is_rtl();
-                    spans.push(ShapeSpan::new(
-                        font_system,
-                        line,
-                        attrs_list,
-                        range.start,
-                        range.end,
-                        line_rtl,
-                        span_rtl
-                    ));
+                    start = i;
+                    run_level = new_level;
                 }
             }
-
+            // runs.push(start..line_range.end);
+            spans.push(ShapeSpan::new(
+                font_system,
+                line,
+                attrs_list,
+                start..line_range.end,
+                line_rtl,
+                run_level,
+            ));
             line_rtl
         };
 
-        Self { rtl, spans}
+        debug!("SPANS:");
+        for span in &spans {
+            debug!("{:?}, {:?}", span.span_range, span.level);
+        }
+        Self { rtl, spans, levels}
     }
+
+    // modified version of unicode_bidi::bidi_info::visual_run
+    fn adjust_levels(
+        para: &unicode_bidi::Paragraph,
+    ) -> Vec<unicode_bidi::Level> {
+        use unicode_bidi::BidiClass::*;
+        let text = para.info.text;
+        let levels = &para.info.levels;
+        let original_classes = &para.info.original_classes;
+
+        let mut levels = levels.clone();
+        let line_classes = &original_classes[..];
+        let line_levels = &mut levels[..];
+
+        // Reset some whitespace chars to paragraph level.
+        // <http://www.unicode.org/reports/tr9/#L1>
+        let line_str: &str = &text[..];
+        let mut reset_from: Option<usize> = Some(0);
+        let mut reset_to: Option<usize> = None;
+        for (i, c) in line_str.char_indices() {
+            match line_classes[i] {
+                // Ignored by X9
+                RLE | LRE | RLO | LRO | PDF | BN => {}
+                // Segment separator, Paragraph separator
+                B | S => {
+                    assert_eq!(reset_to, None);
+                    reset_to = Some(i + c.len_utf8());
+                    if reset_from == None {
+                        reset_from = Some(i);
+                    }
+                }
+                // Whitespace, isolate formatting
+                WS | FSI | LRI | RLI | PDI => {
+                    if reset_from == None {
+                        reset_from = Some(i);
+                    }
+                }
+                _ => {
+                    reset_from = None;
+                }
+            }
+            if let (Some(from), Some(to)) = (reset_from, reset_to) {
+                for level in &mut line_levels[from..to] {
+                    *level = para.para.level;
+                }
+                reset_from = None;
+                reset_to = None;
+            }
+        }
+        if let Some(from) = reset_from {
+            for level in &mut line_levels[from..] {
+                *level = para.para.level;
+            }
+        }
+        levels
+    }
+
+    fn reorder(&self, line: Range<usize>) -> Vec<Range<usize>> {
+        // Find consecutive level runs.
+        let mut runs = Vec::new();
+        let mut start = line.start;
+        let mut run_level = self.levels[start];
+        let mut min_level = run_level;
+        let mut max_level = run_level;
+
+        for (i, &new_level) in self.levels.iter().enumerate().take(line.end).skip(start + 1) {
+            if new_level != run_level {
+                // End of the previous run, start of a new one.
+                runs.push(start..i);
+                start = i;
+                run_level = new_level;
+                min_level = min(run_level, min_level);
+                max_level = max(run_level, max_level);
+            }
+        }
+        runs.push(start..line.end);
+
+        let run_count = runs.len();
+
+        // Re-order the odd runs.
+        // <http://www.unicode.org/reports/tr9/#L2>
+
+        // Stop at the lowest *odd* level.
+        min_level = min_level.new_lowest_ge_rtl().expect("Level error");
+
+        while max_level >= min_level {
+            // Look for the start of a sequence of consecutive runs of max_level or higher.
+            let mut seq_start = 0;
+            while seq_start < run_count {
+                if self.levels[runs[seq_start].start] < max_level {
+                    seq_start += 1;
+                    continue;
+                }
+
+                // Found the start of a sequence. Now find the end.
+                let mut seq_end = seq_start + 1;
+                while seq_end < run_count {
+                    if self.levels[runs[seq_end].start] < max_level {
+                        break;
+                    }
+                    seq_end += 1;
+                }
+
+                // Reverse the runs within this sequence.
+                runs[seq_start..seq_end].reverse();
+
+                seq_start = seq_end;
+            }
+            max_level
+                .lower(1)
+                .expect("Lowering embedding level below zero");
+        }
+
+        runs
+    }
+    
 
     pub fn layout(
         &self,
@@ -482,177 +618,110 @@ impl ShapeLine {
         wrap_simple: bool,
     ) -> Vec<LayoutLine> {
         let mut layout_lines = Vec::with_capacity(1);
+        let mut layout_lines_ranges = Vec::with_capacity(1);
+        let mut layout_line_start = None;
 
-        let mut push_line = true;
-        let mut glyphs = Vec::new();
+
 
         let start_x = if self.rtl { line_width as f32 } else { 0.0 };
         let end_x = if self.rtl { 0.0 } else { line_width as f32 };
         let mut x = start_x;
         let mut y = 0.0;
-        for span in &self.spans {
-            //TODO: improve performance!
-            let mut word_ranges = Vec::new();
-            if wrap_simple {
-                word_ranges.push((0..span.words.len(), false));
-            } else if self.rtl != span.rtl {
-                let mut fit_x = x;
-                let mut fitting_end = span.words.len();
-                for i in (0..span.words.len()).rev() {
-                    let word = &span.words[i];
 
-                    let mut word_size = 0.0;
-                    for glyph in &word.glyphs {
-                        word_size += font_size as f32 * glyph.x_advance;
-                    }
 
-                    let wrap = if self.rtl {
-                        fit_x - word_size < end_x
-                    } else {
-                        fit_x + word_size > end_x
-                    };
+        let num_span = self.spans.len();
+        debug!("Num of spans: {}", num_span);
+        for span_index in 0..num_span {
+            debug!("{span_index}");
 
-                    if wrap {
-                        let mut fitting_start = i + 1;
-                        while fitting_start < fitting_end {
-                            if span.words[fitting_start].blank {
-                                fitting_start += 1;
-                            } else {
-                                break;
-                            }
-                        }
-                        word_ranges.push((fitting_start..fitting_end, true));
-                        fitting_end = i + 1;
-
-                        fit_x = start_x;
-                    }
-
-                    if self.rtl {
-                        fit_x -= word_size;
-                    } else {
-                        fit_x += word_size;
-                    }
-                }
-                if !word_ranges.is_empty() {
-                    while fitting_end > 0 {
-                        if span.words[fitting_end - 1].blank {
-                            fitting_end -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                word_ranges.push((0..fitting_end, false));
+            let span = &self.spans[span_index];
+            if layout_line_start.is_none() {
+                layout_line_start = Some(span.span_range.start);
+                debug!("setting the start to : {}", layout_line_start.unwrap());
             } else {
-                let mut fit_x = x;
-                let mut fitting_start = 0;
-                for i in 0..span.words.len() {
-                    let word = &span.words[i];
+                debug!("layout start wasn't none it was: {}", layout_line_start.unwrap());
 
-                    let mut word_size = 0.0;
-                    for glyph in &word.glyphs {
-                        word_size += font_size as f32 * glyph.x_advance;
-                    }
-
-                    let wrap = if self.rtl {
-                        fit_x - word_size < end_x
-                    } else {
-                        fit_x + word_size > end_x
-                    };
-
-                    if wrap {
-                        //TODO: skip blanks
-                        word_ranges.push((fitting_start..i, true));
-                        fitting_start = i;
-
-                        fit_x = start_x;
-                    }
-
-                    if self.rtl {
-                        fit_x -= word_size;
-                    } else {
-                        fit_x += word_size;
-                    }
-                }
-                word_ranges.push((fitting_start..span.words.len(), false));
             }
 
+            let mut word_ranges = Vec::new();
+
+            let mut fit_x = x;
+            let mut fitting_start = 0;
+
+            for i in 0..span.words.len() {
+                let word = &span.words[i];
+
+                let word_size = font_size as f32 * word.x_advance;
+
+                let wrap = if self.rtl {
+                    fit_x - word_size < end_x
+                } else {
+                    fit_x + word_size > end_x
+                };
+
+                if wrap {
+                    debug!("Looks like this span is gonna be wrapped");
+                    word_ranges.push((fitting_start..i, true));
+                    fitting_start = i;
+                    fit_x = start_x;
+                }
+
+                if self.rtl {
+                    fit_x -= word_size;
+                } else {
+                    fit_x += word_size;
+                }
+            }
+            word_ranges.push((fitting_start..span.words.len(), false));
+
+
+            // Calculate the actual size 
+
+            debug!("Wordranges found:");
+            for a in &word_ranges {
+                debug!("{:?}", a);
+            }
+            debug!("Current x: {}", x);
             for (range, wrap) in word_ranges {
-                for word in span.words[range].iter() {
-                    let mut word_size = 0.0;
-                    for glyph in &word.glyphs {
-                        word_size += font_size as f32 * glyph.x_advance;
+                for word_index in range.clone() {
+                    let word  =  &span.words[word_index];
+                    if layout_line_start.is_none() {
+                        layout_line_start = Some(word.word_range.start);
+                    } else {
+                        debug!("Layout line start wasn't none it was: {}", layout_line_start.unwrap());
                     }
+                    let word_size = font_size as f32 * word.x_advance;
 
                     let word_wrap = if self.rtl {
                         x - word_size < end_x
                     } else {
                         x + word_size > end_x
                     };
-                    if word_wrap && !wrap_simple && !glyphs.is_empty() {
-                        let mut glyphs_swap = Vec::new();
-                        mem::swap(&mut glyphs, &mut glyphs_swap);
-                        layout_lines.push(
-                            LayoutLine {
-                                glyphs: glyphs_swap,
-                            },
-                        );
+
+                    if word_wrap {
+                        debug!("DOES THIS EVEN HAPPEN?");
+                        assert!(layout_line_start.is_some());
+                        layout_lines_ranges.push(layout_line_start.unwrap()..word.word_range.end);
+                        layout_line_start = None;
 
                         x = start_x;
                         y = 0.0;
                     }
 
-                    if x == start_x && word.blank {
-                        // Skip blank words at start of line
-                        continue;
+                    if self.rtl {
+                        x -= word_size;
+                    } else {
+                        x += word_size;
                     }
-
-                    for glyph in &word.glyphs {
-                        let x_advance = font_size as f32 * glyph.x_advance;
-                        let y_advance = font_size as f32 * glyph.y_advance;
-
-                        //TODO: fix ordering when in bidi text
-                        let glyph_wrap = if self.rtl {
-                            x - x_advance < end_x
-                        } else {
-                            x + x_advance > end_x
-                        };
-
-                        if glyph_wrap && wrap_simple && ! glyphs.is_empty() {
-                            let mut glyphs_swap = Vec::new();
-                            mem::swap(&mut glyphs, &mut glyphs_swap);
-                            layout_lines.push(
-                                LayoutLine {
-                                    glyphs: glyphs_swap,
-                                },
-                            );
-
-                            x = start_x;
-                            y = 0.0;
-                        }
-
-                        if self.rtl {
-                            x -= x_advance;
-                        }
-
-                        glyphs.push(glyph.layout(font_size, x, y, span.rtl));
-                        push_line = true;
-
-                        if !self.rtl {
-                            x += x_advance;
-                        }
-                        y += y_advance;
-                    }
+                    y += font_size as f32 * word.y_advance;
                 }
 
-                if wrap && ! glyphs.is_empty() {
-                    let mut glyphs_swap = Vec::new();
-                    mem::swap(&mut glyphs, &mut glyphs_swap);
-                    layout_lines.push(
-                        LayoutLine {
-                            glyphs: glyphs_swap,
-                        },
-                    );
+                if wrap {
+                    debug!("this is a wrap");
+
+                    assert!(layout_line_start.is_some());
+                    layout_lines_ranges.push(layout_line_start.unwrap()..span.span_range.end);
+                    layout_line_start = None;
 
                     x = start_x;
                     y = 0.0;
@@ -660,14 +729,126 @@ impl ShapeLine {
             }
         }
 
-        if push_line {
+            // if self.rtl != span.level.is_rtl() {
+            //     let mut fit_x = x;
+            //     let mut fitting_end = span.words.len();
+            //     for i in (0..span.words.len()).rev() {
+            //         let word = &span.words[i];
+            //
+            //         let mut word_size = 0.0;
+            //         for glyph in &word.glyphs {
+            //             word_size += font_size as f32 * glyph.x_advance;
+            //         }
+            //
+            //         let wrap = if self.rtl {
+            //             fit_x - word_size < end_x
+            //         } else {
+            //             fit_x + word_size > end_x
+            //         };
+            //
+            //         if wrap {
+            //             let mut fitting_start = i + 1;
+            //             while fitting_start < fitting_end {
+            //                 if span.words[fitting_start].blank {
+            //                     fitting_start += 1;
+            //                 } else {
+            //                     break;
+            //                 }
+            //             }
+            //             word_ranges.push(((fitting_start..fitting_end, true), 
+            //                               span.words[fitting_start-1].word_range.start..span.words[fitting_end-1].word_range.end));
+            //             fitting_end = i + 1;
+            //
+            //             fit_x = start_x;
+            //         }
+            //
+            //         if self.rtl {
+            //             fit_x -= word_size;
+            //         } else {
+            //             fit_x += word_size;
+            //         }
+            //     }
+            //     if !word_ranges.is_empty() {
+            //         while fitting_end > 0 {
+            //             if span.words[fitting_end - 1].blank {
+            //                 fitting_end -= 1;
+            //             } else {
+            //                 break;
+            //             }
+            //         }
+            //     }
+            //     word_ranges.push(((0..fitting_end, false), 0..span.words[fitting_end-1].word_range.end));
+            // } else {
+
+        let mut current_line_index = 0;
+        let mut first = true;
+        loop {
+            if first {first=false;} else {current_line_index+=1;}
+            if current_line_index >= layout_lines_ranges.len() {
+                break;
+            }
+            let range = &layout_lines_ranges[current_line_index];
+            debug!("Ranges found: {range:?}");
+
+            let mut current_span_index = 0;
+
+
+
+
+            // Find all the spans that fit inside this range:
+            let mut glyphs = Vec::new();
+            // let runs = self.reorder(range);
+
+            x = start_x;
+            y = 0.;
+            let mut first_span = true;
+            loop {
+                if first_span {first_span=false;} else {current_span_index+=1;}
+                let span = &self.spans[current_span_index];
+            // for span in &self.spans {
+                
+                if range.contains(&span.span_range.start) && range.contains(&(span.span_range.end -1)) {
+
+                    debug!("range contains the span");
+                    for word in &span.words {
+                        for glyph in &word.glyphs {
+                            let x_advance = font_size as f32 * glyph.x_advance;
+                            let y_advance = font_size as f32 * glyph.y_advance;
+                            if self.rtl {
+                                x -= x_advance;
+                            }
+                            glyphs.push(glyph.layout(font_size, x, y, span.level));
+                            if !self.rtl {
+                                x += x_advance;
+                            }
+                            y += y_advance;
+                        }
+                    }
+                }
+                current_span_index += 1;
+                if current_span_index >= self.spans.len() {
+                    break;
+                }
+            }
+
+            debug!("Creating a line");
+            
+            let mut glyphs_swap = Vec::new();
+            mem::swap(&mut glyphs, &mut glyphs_swap);
             layout_lines.push(
                 LayoutLine {
-                    glyphs,
+                   glyphs: glyphs_swap,
                 },
             );
+
+            
         }
 
+        debug!("How many lines?: {}", layout_lines.len());
+        for line in &layout_lines {
+            debug!("glyphs: {:?}", line.glyphs);
+
+        }
         layout_lines
     }
 }

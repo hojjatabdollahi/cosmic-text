@@ -135,7 +135,7 @@ fn main() {
 
             editor.buffer_mut().set_redraw(false);
 
-            log::debug!("redraw: {:?}", instant.elapsed());
+            // log::debug!("redraw: {:?}", instant.elapsed());
         }
 
         let mut found_event = false;

@@ -245,8 +245,8 @@ impl<'a> Edit<'a> for SyntaxEditor<'a> {
 
         if highlighted > 0 {
             buffer.set_redraw(true);
-            #[cfg(feature = "std")]
-            log::debug!("Syntax highlighted {} lines in {:?}", highlighted, now.elapsed()); 
+            // #[cfg(feature = "std")]
+            // log::debug!("Syntax highlighted {} lines in {:?}", highlighted, now.elapsed()); 
         }
 
         self.editor.shape_as_needed();

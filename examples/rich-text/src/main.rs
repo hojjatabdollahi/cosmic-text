@@ -160,7 +160,7 @@ fn main() {
             editor.buffer_mut().set_redraw(false);
 
             let duration = instant.elapsed();
-            log::debug!("redraw: {:?}", duration);
+            // log::debug!("redraw: {:?}", duration);
         }
 
         for event in window.events() {
