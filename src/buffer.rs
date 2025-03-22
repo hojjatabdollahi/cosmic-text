@@ -7,8 +7,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     Affinity, Align, Attrs, AttrsList, BidiParagraphs, BorrowedWithFontSystem, BufferLine, Color,
-    Cursor, FontSystem, LayoutCursor, LayoutGlyph, LayoutLine, LineEnding, LineIter, Motion,
-    Scroll, ShapeLine, Shaping, Wrap,
+    Cursor, Ellipsize, FontSystem, LayoutCursor, LayoutGlyph, LayoutLine, LineEnding, LineIter,
+    Motion, Scroll, ShapeLine, Shaping, Wrap,
 };
 
 /// A line of visible text for rendering
@@ -212,6 +212,7 @@ pub struct Buffer {
     /// True if a redraw is requires. Set to false after processing
     redraw: bool,
     wrap: Wrap,
+    ellipsize: Ellipsize,
     monospace_width: Option<f32>,
     tab_width: u16,
 }
@@ -226,6 +227,7 @@ impl Clone for Buffer {
             scroll: self.scroll,
             redraw: self.redraw,
             wrap: self.wrap,
+            ellipsize: self.ellipsize,
             monospace_width: self.monospace_width,
             tab_width: self.tab_width,
         }
@@ -254,6 +256,7 @@ impl Buffer {
             scroll: Scroll::default(),
             redraw: false,
             wrap: Wrap::WordOrGlyph,
+            ellipsize: Ellipsize::None,
             monospace_width: None,
             tab_width: 8,
         }
@@ -293,6 +296,7 @@ impl Buffer {
                     self.metrics.font_size,
                     self.width_opt,
                     self.wrap,
+                    self.ellipsize,
                     self.monospace_width,
                     self.tab_width,
                 );
@@ -540,6 +544,7 @@ impl Buffer {
             self.metrics.font_size,
             self.width_opt,
             self.wrap,
+            self.ellipsize,
             self.monospace_width,
             self.tab_width,
         ))
@@ -568,6 +573,14 @@ impl Buffer {
     pub fn set_wrap(&mut self, font_system: &mut FontSystem, wrap: Wrap) {
         if wrap != self.wrap {
             self.wrap = wrap;
+            self.relayout(font_system);
+            self.shape_until_scroll(font_system, false);
+        }
+    }
+
+    pub fn set_ellipsize(&mut self, font_system: &mut FontSystem, ellipsize: Ellipsize) {
+        if ellipsize != self.ellipsize {
+            self.ellipsize = ellipsize;
             self.relayout(font_system);
             self.shape_until_scroll(font_system, false);
         }
@@ -1400,6 +1413,10 @@ impl BorrowedWithFontSystem<'_, Buffer> {
     /// Set the current [`Wrap`]
     pub fn set_wrap(&mut self, wrap: Wrap) {
         self.inner.set_wrap(self.font_system, wrap);
+    }
+
+    pub fn set_ellipsize(&mut self, ellipsize: Ellipsize) {
+        self.inner.set_ellipsize(self.font_system, ellipsize);
     }
 
     /// Set the current buffer dimensions

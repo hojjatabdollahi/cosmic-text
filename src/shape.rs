@@ -13,9 +13,51 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::fallback::FontFallbackIter;
 use crate::{
-    math, Align, AttrsList, CacheKeyFlags, Color, Font, FontSystem, LayoutGlyph, LayoutLine,
-    Metrics, Wrap,
+    math, Align, AttrsList, CacheKeyFlags, Color, Ellipsize, Font, FontSystem, HeightLimit,
+    LayoutGlyph, LayoutLine, Metrics, Wrap,
 };
+
+#[derive(Clone, Debug, Default)]
+struct Ellipsis {
+    ellipsis: Option<ShapeSpan>,
+    w: f32,
+}
+
+impl Ellipsis {
+    fn new(ellipsis: Option<ShapeSpan>, w: f32) -> Self {
+        Self { ellipsis, w }
+    }
+
+    /// Creates an ellipsis span to insert where needed
+    pub fn build_ellipsis(
+        font_system: &mut FontSystem,
+        attrs_list: &AttrsList,
+        shaping: Shaping,
+    ) -> Self {
+        // TODO: make it configurable
+        let ellipsis_str = "…";
+        // Mongolian ellipsis
+        // let ellipsis_str = "᠁";
+
+        let ellipsis = ShapeSpan::new(
+            font_system,
+            ellipsis_str,
+            attrs_list,
+            0..3,
+            false,
+            unicode_bidi::LTR_LEVEL,
+            shaping,
+        );
+
+        // calculate the x_advance once since it doesn't change, TODO: right?
+        let w = ellipsis
+            .words
+            .iter()
+            .map(|w| w.glyphs.iter().map(|g| g.x_advance).sum::<f32>())
+            .sum();
+        return Self::new(Some(ellipsis), w);
+    }
+}
 
 /// The shaping strategy of some text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -795,6 +837,7 @@ pub struct ShapeLine {
     pub rtl: bool,
     pub spans: Vec<ShapeSpan>,
     pub metrics_opt: Option<Metrics>,
+    ellipsis: Ellipsis,
 }
 
 // Visual Line Ranges: (span_index, (first_word_index, first_glyph_index), (last_word_index, last_glyph_index))
@@ -824,6 +867,7 @@ impl ShapeLine {
             rtl: false,
             spans: Vec::default(),
             metrics_opt: None,
+            ellipsis: Ellipsis::default(),
         }
     }
 
@@ -944,6 +988,7 @@ impl ShapeLine {
         self.rtl = rtl;
         self.spans = spans;
         self.metrics_opt = attrs_list.defaults().metrics_opt.map(|x| x.into());
+        self.ellipsis = Ellipsis::build_ellipsis(font_system, attrs_list, shaping);
 
         // Return the buffer for later reuse.
         font_system.shape_buffer.spans = cached_spans;
@@ -1066,12 +1111,67 @@ impl ShapeLine {
         runs
     }
 
+    /// Finds as much of the text that fits inside a line with `line_width`
+    /// Returns the `VisualLineInfo` and a bool indicating if an overflow happened.
+    fn fit_in_line(
+        &self,
+        line_width: f32,
+        font_size: f32,
+        _span_start: (usize, usize),
+    ) -> (VisualLine, bool) {
+        let mut vl = VisualLine::default();
+        let mut fit_x = line_width;
+        let ellipsis_size = self.ellipsis.w * font_size;
+        for (span_index, span) in self.spans.iter().enumerate() {
+            let span_width = span
+                .words
+                .iter()
+                .map(|word| word.width(font_size))
+                .sum::<f32>();
+            // let span_width = font_size * span.x_advance;
+            if (fit_x - ellipsis_size - span_width >= 0.)
+                || (fit_x - span_width >= 0. && span_index == self.spans.len() - 1)
+            {
+                // fits
+                vl.ranges.push((span_index, (0, 0), (span.words.len(), 0)));
+                fit_x -= span_width;
+            } else {
+                // the span doesn't fit, fit as many words as you can
+                for (word_i, word) in span.words.iter().enumerate() {
+                    let word_width = word.width(font_size);
+                    if fit_x - ellipsis_size - word_width >= 0. {
+                        fit_x -= word_width;
+                        continue;
+                    } else {
+                        // the word doesn't fit, fit as many glyphs as you can
+                        for (glyph_i, glyph) in word.glyphs.iter().enumerate() {
+                            let glyph_width = font_size * glyph.x_advance;
+                            if fit_x - ellipsis_size - glyph_width >= 0. {
+                                fit_x -= glyph_width;
+                                continue;
+                            } else {
+                                // the glyph doesn't fit, return the word and glyph
+                                // index
+                                vl.ranges.push((span_index, (0, 0), (word_i, glyph_i)));
+                                // overflow is true
+                                return (vl, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // return the visual line and overflow is false
+        (vl, false)
+    }
+
     pub fn layout(
         &self,
         font_size: f32,
         width_opt: Option<f32>,
         wrap: Wrap,
         align: Option<Align>,
+        ellipsize: Ellipsize,
         match_mono_width: Option<f32>,
     ) -> Vec<LayoutLine> {
         let mut lines = Vec::with_capacity(1);
@@ -1081,6 +1181,7 @@ impl ShapeLine {
             width_opt,
             wrap,
             align,
+            ellipsize,
             &mut lines,
             match_mono_width,
         );
@@ -1094,6 +1195,7 @@ impl ShapeLine {
         width_opt: Option<f32>,
         wrap: Wrap,
         align: Option<Align>,
+        ellipsize: Ellipsize,
         layout_lines: &mut Vec<LayoutLine>,
         match_mono_width: Option<f32>,
     ) {
@@ -1107,6 +1209,8 @@ impl ShapeLine {
             l.clear();
             l
         }));
+
+        let mut overflow = false;
 
         // Cache glyph sets in reverse order so they will ideally be reused in exactly the same lines.
         let mut cached_glyph_sets = mem::take(&mut scratch.glyph_sets);
@@ -1140,24 +1244,44 @@ impl ShapeLine {
         let mut current_visual_line = cached_visual_lines.pop().unwrap_or_default();
 
         if wrap == Wrap::None {
-            for (span_index, span) in self.spans.iter().enumerate() {
-                let mut word_range_width = 0.;
-                let mut number_of_blanks: u32 = 0;
-                for word in span.words.iter() {
-                    let word_width = word.width(font_size);
-                    word_range_width += word_width;
-                    if word.blank {
-                        number_of_blanks += 1;
+            match ellipsize {
+                Ellipsize::None => {
+                    for (span_index, span) in self.spans.iter().enumerate() {
+                        let mut word_range_width = 0.;
+                        let mut number_of_blanks: u32 = 0;
+                        for word in span.words.iter() {
+                            let word_width = word.width(font_size);
+                            word_range_width += word_width;
+                            if word.blank {
+                                number_of_blanks += 1;
+                            }
+                        }
+                        add_to_visual_line(
+                            &mut current_visual_line,
+                            span_index,
+                            (0, 0),
+                            (span.words.len(), 0),
+                            word_range_width,
+                            number_of_blanks,
+                        );
                     }
                 }
-                add_to_visual_line(
-                    &mut current_visual_line,
-                    span_index,
-                    (0, 0),
-                    (span.words.len(), 0),
-                    word_range_width,
-                    number_of_blanks,
-                );
+                Ellipsize::Start => {}
+                Ellipsize::Middle => {}
+                Ellipsize::End(limit) => match limit {
+                    HeightLimit::Default | HeightLimit::Lines(0) | HeightLimit::Lines(1) => {
+                        (current_visual_line, overflow) =
+                            self.fit_in_line(width_opt.unwrap_or(f32::INFINITY), font_size, (0, 0));
+                    }
+                    HeightLimit::Lines(_max_lines) => {
+                        unimplemented!(
+                            "Ellipsizing by a specific number of lines is not implemented yet"
+                        )
+                    }
+                    HeightLimit::Height => {
+                        unimplemented!("Ellipsizing by a specific height is not implemented yet")
+                    }
+                },
             }
         } else {
             for (span_index, span) in self.spans.iter().enumerate() {
@@ -1582,6 +1706,39 @@ impl ShapeLine {
                 /* LTR */
                 for range in new_order {
                     process_range(range);
+                }
+            }
+
+            if overflow {
+                println!("Overflowed, adding ellipsis glyph");
+                let ellipsis = self
+                    .ellipsis
+                    .ellipsis
+                    .as_ref()
+                    .expect("How are we overflowing without setting up ellipsis?!");
+                for word in &ellipsis.words {
+                    for glyph in &word.glyphs {
+                        let font_size = glyph.metrics_opt.map_or(font_size, |x| x.font_size);
+                        let x_advance = font_size * glyph.x_advance;
+                        if self.rtl {
+                            x -= x_advance;
+                        }
+                        let y_advance = font_size * glyph.y_advance;
+                        glyphs.push(glyph.layout(
+                            font_size,
+                            glyph.metrics_opt.map(|x| x.line_height),
+                            x,
+                            y,
+                            x_advance,
+                            ellipsis.level,
+                        ));
+                        if !self.rtl {
+                            x += x_advance;
+                        }
+                        y += y_advance;
+                        max_ascent = max_ascent.max(font_size * glyph.ascent);
+                        max_descent = max_descent.max(font_size * glyph.descent);
+                    }
                 }
             }
 

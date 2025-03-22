@@ -4,6 +4,7 @@ use cosmic_text::BorrowedWithFontSystem;
 use cosmic_text::CacheKeyFlags;
 use cosmic_text::Color;
 use cosmic_text::Editor;
+use cosmic_text::HeightLimit;
 use cosmic_text::Shaping;
 use cosmic_text::Style;
 use cosmic_text::{
@@ -22,7 +23,8 @@ use winit::{
 fn set_buffer_text(buffer: &mut BorrowedWithFontSystem<'_, Buffer>) {
     let attrs = Attrs::new();
     buffer.set_text("Very long text that would definitely go over one singular line and would wrap to the next line and some other stuff", attrs, Shaping::Advanced);
-    buffer.set_wrap(cosmic_text::Wrap::None)
+    buffer.set_wrap(cosmic_text::Wrap::None);
+    buffer.set_ellipsize(cosmic_text::Ellipsize::End(HeightLimit::Default))
 }
 
 fn main() {

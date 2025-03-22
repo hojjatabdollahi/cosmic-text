@@ -3,7 +3,8 @@ use alloc::{string::String, vec::Vec};
 use core::mem;
 
 use crate::{
-    Align, Attrs, AttrsList, Cached, FontSystem, LayoutLine, LineEnding, ShapeLine, Shaping, Wrap,
+    Align, Attrs, AttrsList, Cached, Ellipsize, FontSystem, LayoutLine, LineEnding, ShapeLine,
+    Shaping, Wrap,
 };
 
 /// A line (or paragraph) of text that is shaped and laid out
@@ -236,6 +237,7 @@ impl BufferLine {
         font_size: f32,
         width_opt: Option<f32>,
         wrap: Wrap,
+        ellipsize: Ellipsize,
         match_mono_width: Option<f32>,
         tab_width: u16,
     ) -> &[LayoutLine] {
@@ -252,6 +254,7 @@ impl BufferLine {
                 width_opt,
                 wrap,
                 align,
+                ellipsize,
                 &mut layout,
                 match_mono_width,
             );
