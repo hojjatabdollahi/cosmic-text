@@ -126,9 +126,10 @@ impl Display for Wrap {
 }
 
 /// The maximum allowed number of lines before ellipsizing
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Default)]
 pub enum HeightLimit {
     /// Default is a single line
+    #[default]
     Default,
     /// Number of maximum lines allowed, `Line(0)`, or `Line(1)`, would be the same as `Default`,
     /// which is a single line. The ellipsis will show at the end of the last line.
@@ -149,6 +150,12 @@ pub enum Ellipsize {
     Middle,
     /// Ellipsis at the end, can create one, or more lines depending on the `HeighLimit`
     End(HeightLimit),
+}
+
+impl Default for Ellipsize {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 /// Align or justify

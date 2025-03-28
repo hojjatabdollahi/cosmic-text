@@ -1,6 +1,6 @@
 use cosmic_text::{
-    fontdb, Align, Attrs, AttrsList, BidiParagraphs, Buffer, Family, FontSystem, LayoutLine,
-    Metrics, ShapeLine, Shaping, Weight, Wrap,
+    fontdb, Align, Attrs, AttrsList, BidiParagraphs, Buffer, Ellipsize, Family, FontSystem,
+    LayoutLine, Metrics, ShapeLine, Shaping, Weight, Wrap,
 };
 
 // Test for https://github.com/pop-os/cosmic-text/issues/134
@@ -23,14 +23,30 @@ fn stable_wrap() {
     let mut check_wrap = |text: &_, wrap, align_opt, start_width_opt| {
         let line = ShapeLine::new(&mut font_system, text, &attrs, Shaping::Advanced, 8);
 
-        let layout_unbounded = line.layout(font_size, start_width_opt, wrap, align_opt, None);
+        let layout_unbounded = line.layout(
+            font_size,
+            start_width_opt,
+            Option::None,
+            wrap,
+            align_opt,
+            cosmic_text::Ellipsize::None,
+            None,
+        );
         let max_width = layout_unbounded.iter().map(|l| l.w).fold(0.0, f32::max);
         let new_limit = match start_width_opt {
             Some(start_width) => f32::min(start_width, max_width),
             None => max_width,
         };
 
-        let layout_bounded = line.layout(font_size, Some(new_limit), wrap, align_opt, None);
+        let layout_bounded = line.layout(
+            font_size,
+            Some(new_limit),
+            Option::None,
+            wrap,
+            align_opt,
+            Ellipsize::None,
+            None,
+        );
         let bounded_max_width = layout_bounded.iter().map(|l| l.w).fold(0.0, f32::max);
 
         // For debugging:

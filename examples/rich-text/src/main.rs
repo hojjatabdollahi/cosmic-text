@@ -24,7 +24,8 @@ fn set_buffer_text(buffer: &mut BorrowedWithFontSystem<'_, Buffer>) {
     let attrs = Attrs::new();
     buffer.set_text("Very long text that would definitely go over one singular line and would wrap to the next line and some other stuff", attrs, Shaping::Advanced);
     buffer.set_wrap(cosmic_text::Wrap::None);
-    buffer.set_ellipsize(cosmic_text::Ellipsize::End(HeightLimit::Default))
+    // buffer.set_ellipsize(cosmic_text::Ellipsize::End(HeightLimit::Default))
+    buffer.set_ellipsize(cosmic_text::Ellipsize::Start)
 }
 
 fn main() {
