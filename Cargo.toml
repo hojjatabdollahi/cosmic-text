@@ -15,7 +15,7 @@ core_maths = { version = "0.1.1", optional = true }
 cosmic_undo_2 = { version = "0.2.0", optional = true }
 fontdb = { version = "0.23", default-features = false }
 harfrust = { version = "0.5.0", default-features = false }
-hashbrown = { version = "0.16", optional = true, default-features = false }
+hashbrown = { version = "0.17", optional = true, default-features = false }
 libm = { version = "0.2.16", optional = true }
 linebender_resource_handle = { version = "0.1.1", default-features = false }
 log = "0.4.29"
@@ -50,14 +50,14 @@ no_std = ["hashbrown", "dep:libm", "skrifa/libm", "core_maths", "swash?/libm"]
 peniko = []
 shape-run-cache = []
 std = [
-    "fontdb/memmap",
-    "fontdb/std",
-    "harfrust/std",
-    "linebender_resource_handle/std",
-    "skrifa/std",
-    "swash?/std",
-    "sys-locale",
-    "unicode-bidi/std",
+  "fontdb/memmap",
+  "fontdb/std",
+  "harfrust/std",
+  "linebender_resource_handle/std",
+  "skrifa/std",
+  "swash?/std",
+  "sys-locale",
+  "unicode-bidi/std",
 ]
 vi = ["modit", "syntect", "cosmic_undo_2"]
 wasm-web = ["sys-locale?/js"]
@@ -77,7 +77,7 @@ members = ["examples/*"]
 [dev-dependencies]
 tiny-skia = "0.11.4"
 criterion = { version = "0.8.1", default-features = false, features = [
-    "cargo_bench_support",
+  "cargo_bench_support",
 ] }
 
 [profile.test]
